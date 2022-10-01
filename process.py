@@ -6,6 +6,10 @@ lines = file.readlines()
 pattern = re.compile(
     '^(?P<indent>`\s*`)?(?P<code>[0-9]+)\s+(?P<name>[^0-9]*)\s+(?P<born>[0-9]+)\s*(?P<date2>[0-9]+)?\s*(?P<date3>[0-9]+)?\s*(((?P<spouse>[^0-9]*)(\s\((?P<code2>[0-9]*)\))?)(\s+(?P<born2>[0-9]+)?\s*(?P<dead2>[0-9]+)?)?)?$')
 
+namePattern = re.compile('^(?P<first>.*)\s(?P<last>[A-Z]?.?[A-Z][A-Z]+.*)$')
+
+nicknamePattern = re.compile('(?P<first>.*)\s«(?P<nick>.*)»')
+
 class Event:
     def __init__(self):
         self.indented = False
@@ -45,10 +49,11 @@ def events():
                     spouse = Event()
                     spouse.spouse = True
                     spouse.name = m.group('spouse').replace(
-                        "*", "").replace("(", "").replace(")", "").title().strip()
+                        "*", "").replace("(", "").replace(")", "").strip()
                     spouse.born = m.group('born2')
                     spouse.dead = m.group('dead2')
-                    spouse.cross = m.group('code2')
+                    if m.group('code2'):
+                        spouse.cross = m.group('code2')
                     attributes(spouse, m.group('spouse'))
                     if m.group("date3"):
                         main.dead = m.group("date2")
@@ -92,22 +97,85 @@ def normalized():
 
 def records():
     for i in normalized():
-        main = not i.spouse
-        prefix = "I" if main else "S"
+        if i.spouse and not i.cross and not namePattern.match(i.name):
+            continue
+        if not i.cross:
+            main = not i.spouse
+            prefix = "I" if main else "S"
 
-        s = f'0 @{prefix}{i.code}@ INDI\n'
-        s += f'1 NAME {i.name}\n'
-        if main:
-            s += f'2 GIVN {i.name}\n'
-            s += f'2 SURN Bovet\n'
-            if len(i.code) > 1:
-                s += f'1 FAMC @F{i.code[:-1]}@\n'
-        yield s
+            s = f'0 @{prefix}{i.code.rjust(4, "0")}@ INDI\n'
+            s += f'1 NAME\n'
+            if main:
+                m = nicknamePattern.match(i.name)
+                if m:
+                    s += f'2 GIVN {m.group("first")}\n'
+                    s += f'2 NICK {m.group("nick")}\n'
+                else:
+                    s += f'2 GIVN {i.name}\n'
+                s += f'2 SURN Bovet\n'
+                if len(i.code) > 1:
+                    s += f'1 FAMC @F{i.code[:-1].rjust(4, "0")}@\n'
+            else:
+                m = namePattern.match(i.name)
+                if m:
+                    first = m.group('first')
+                    last = m.group('last').title().replace("’O", "’o")
+                    particle = first.lower().strip().split(' ')[-1]
+                    if particle in [ 'de', 'du', 'von', 'van' ]:
+                        first = first[0:-len(particle)]
+                        if "du BOIS" in first:
+                            first = first.replace("du BOIS", "")
+                            last = "Bois "+last
+                            particle = "du"
+                        s += f'2 SPFX {particle}\n'
+                    if "GORDILLO" in first:
+                        first = first.replace("GORDILLO", "")
+                        last = "Gordillo "+last
+                    s += f'2 SURN {last}\n'
+                    m = nicknamePattern.match(first)
+                    if m:
+                        s += f'2 GIVN {m.group("first")}\n'
+                        s += f'2 NICK {m.group("nick")}\n'
+                    else:
+                        s += f'2 GIVN {first}\n'
 
-        if not main:
-            s = f'0 @F{i.code}@ FAM\n'
-            s += "1 HUSB " + ("@I"+i.code.replace("0","")+"@" if i.female else "@S"+i.code+"@")+"\n"
-            s += "1 WIFE " + ("@I"+i.code.replace("0", "")+"@" if not i.female else "@S"+i.code+"@")+"\n"
+            if i.female:
+                s += f'1 SEX F\n'
+            else:
+                s += f'1 SEX M\n'
+
+            if i.born:
+                s += f'1 BIRT\n'
+                if i.born != '0000':
+                    s += f'2 DATE {i.born}\n'
+            if i.dead:
+                s += f'1 DEAT\n'
+                if i.dead != '0000':
+                    s += f'2 DATE {i.dead}\n'
+
+            yield s
+
+        if not main or i.cross:
+            if i.cross:
+                wife = i.cross
+            else:
+                wife = i.code
+
+            if not i.female or i.cross:
+                prefix = "I"
+            else:
+                prefix = "S"
+
+            s = f'0 @F{i.code.rjust(4, "0")}@ FAM\n'
+            s += "1 HUSB " + ("@I"+re.sub("0+$", "", i.code).rjust(4,
+                                                                 "0")+"@" if i.female else "@S"+i.code.rjust(4, "0")+"@")+"\n"
+            s += "1 WIFE " + ("@"+prefix+re.sub("0+$", "", wife).rjust(4,
+                                                                 "0")+"@" if not i.female else "@"+prefix+wife.rjust(4, "0")+"@")+"\n"
+            s += f'1 MARR\n'
+            if i.married and i.married != '0000':
+                s += f'2 DATE {i.married}\n'
+            if i.divorced:
+                s += f'1 DIV\n'
             yield s
 
 
@@ -122,9 +190,9 @@ print('''0 HEAD
 1 SOUR gedcom.org
 0 @U@ SUBM
 1 NAME gedcom.org
-''')
+''', end='')
 for i in records():
-    print(i)
+    print(i, end='')
 print("0 TRLR")
 
 
